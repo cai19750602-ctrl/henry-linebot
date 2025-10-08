@@ -1,70 +1,99 @@
-// index.js (robust version: manual signature validation)
 import express from "express";
-import crypto from "crypto";
+import bodyParser from "body-parser";
 import line from "@line/bot-sdk";
 
 const {
   CHANNEL_ACCESS_TOKEN,
   CHANNEL_SECRET,
   CRON_SECRET,
-  PUSH_USER_ID,
-  PORT,
+  PUSH_USER_ID
 } = process.env;
 
-// 只給 Client 用的設定（middleware 我們自己做）
-const client = new line.Client({
+const config = {
   channelAccessToken: CHANNEL_ACCESS_TOKEN,
-});
+  channelSecret: CHANNEL_SECRET
+};
 
 const app = express();
+app.use(bodyParser.json());
+const client = new line.Client(config);
+
+// 🔹 片假名修正字典（可自行增加）
+const katakanaFixMap = {
+  シ: "shi",
+  ツ: "tsu",
+  ソ: "so",
+  ン: "n",
+  ス: "su",
+  フ: "fu",
+  ヂ: "ji",
+  ヅ: "zu",
+  ジ: "ji",
+  ズ: "zu",
+};
 
 // 健康檢查
 app.get("/", (_req, res) => res.status(200).send("OK"));
 
-/**
- * Webhook：
- * 1) 用 express.raw() 取得「原始 body」
- * 2) 自己計算 HMAC-SHA256(base64) 與 x-line-signature 比對
- * 3) 通過後再 JSON.parse 原始字串進行事件處理
- */
-app.post("/webhook", express.raw({ type: "*/*" }), async (req, res) => {
-  try {
-    const signature = req.get("x-line-signature") || "";
-    const rawBody = req.body?.toString() || "";
+// 📩 Webhook
+app.post("/webhook", line.middleware(config), async (req, res) => {
+  const events = req.body.events;
 
-    // 驗簽
-    const hash = crypto
-      .createHmac("SHA256", CHANNEL_SECRET)
-      .update(rawBody)
-      .digest("base64");
+  for (const event of events) {
+    console.log("EVENT:", JSON.stringify(event));
 
-    if (hash !== signature) {
-      console.error("Invalid signature");
-      return res.status(401).send("Invalid signature");
-    }
+    if (event.type === "message" && event.message.type === "text") {
+      const input = event.message.text.trim();
 
-    // 驗簽 OK，才把 body 轉回 JSON
-    const json = JSON.parse(rawBody);
-    const events = json.events || [];
-
-    for (const event of events) {
-      console.log("EVENT:", JSON.stringify(event)); // 這裡能看到 userId
-
-      if (event.type === "message" && event.message?.type === "text") {
-        await client.replyMessage(event.replyToken, {
-          type: "text",
-          text: `你說了：${event.message.text}`,
-        });
+      // 🔹 日文片假名糾正
+      let corrections = [];
+      for (const [kana, roma] of Object.entries(katakanaFixMap)) {
+        if (input.includes(kana)) {
+          corrections.push(`${kana} → ${roma}`);
+        }
       }
-    }
 
-    return res.status(200).end();
-  } catch (err) {
-    console.error("Webhook Error:", err);
-    return res.status(500).end();
+      let replyText;
+      if (corrections.length > 0) {
+        replyText = `👀 發現了片假名可以改得更好喔！\n${corrections.join("\n")}`;
+      } else if (/おはよう|早安/.test(input)) {
+        replyText = "おはよう〜☀️ 今日もがんばろうね！";
+      } else if (/こんばんは|晚安/.test(input)) {
+        replyText = "おやすみ💤 ゆっくり休んでね〜";
+      } else {
+        replyText = `你說了：${input}`;
+      }
+
+      await client.replyMessage(event.replyToken, {
+        type: "text",
+        text: replyText
+      });
+    }
   }
+
+  res.status(200).end();
 });
 
+// 📆 自動每日推播
+app.post("/cron", async (req, res) => {
+  const token = req.query.token;
+  if (!CRON_SECRET || token !== CRON_SECRET) return res.sendStatus(403);
+  if (!PUSH_USER_ID) return res.status(200).send("PUSH_USER_ID not set");
+
+  const messages = [
+    "おはよう！きょうもがんばろう！",
+    "すこしずつ、じぶんのペースで。",
+    "きょうはいいひですね。",
+    "やすむことも、たいせつです。"
+  ];
+  const msg = messages[Math.floor(Math.random() * messages.length)];
+
+  await client.pushMessage(PUSH_USER_ID, { type: "text", text: msg });
+  res.status(200).send("pushed");
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log("Bot is running on port", port));
 // 可選：Cron 推播
 app.post("/cron", async (req, res) => {
   const token = req.query.token;
