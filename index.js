@@ -1,5 +1,4 @@
 import express from "express";
-import bodyParser from "body-parser";
 import line from "@line/bot-sdk";
 
 const {
@@ -15,75 +14,76 @@ const config = {
 };
 
 const app = express();
-app.use(bodyParser.json());
 const client = new line.Client(config);
 
-const katakanaFixMap = {
-  シ: "shi",
-  ツ: "tsu",
-  ソ: "so",
-  ン: "n",
-  ス: "su",
-  フ: "fu",
-  ヂ: "ji",
-  ヅ: "zu",
-  ジ: "ji",
-  ズ: "zu",
-};
-
-// 健康檢查
+// 1) Health check
 app.get("/", (_req, res) => res.status(200).send("OK"));
 
-// Webhook
-app.post("/webhook", line.middleware(config), async (req, res) => {
-  const events = req.body.events;
-  for (const event of events) {
-    if (event.type === "message" && event.message.type === "text") {
-      const input = event.message.text.trim();
+// 2) WEBHOOK — must be raw, and must come BEFORE any express.json()
+app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
+  try {
+    const signature = req.get("x-line-signature") || "";
+    const bodyText = req.body.toString("utf8"); // raw buffer -> string
 
-      const corrections = [];
-      for (const [kana, roma] of Object.entries(katakanaFixMap)) {
-        if (input.includes(kana)) corrections.push(`${kana} → ${roma}`);
-      }
-
-      let replyText;
-      if (corrections.length > 0) {
-        replyText = `👀 發現了片假名可以改得更好喔！\n${corrections.join("\n")}`;
-      } else if (/おはよう|早安/.test(input)) {
-        replyText = "おはよう〜☀️ 今日もがんばろうね！";
-      } else if (/こんばんは|晚安/.test(input)) {
-        replyText = "おやすみ💤 ゆっくり休んでね〜";
-      } else {
-        replyText = `你說了：${input}`;
-      }
-
-      await client.replyMessage(event.replyToken, {
-        type: "text",
-        text: replyText
-      });
+    // Validate signature first
+    const ok = line.validateSignature(bodyText, CHANNEL_SECRET, signature);
+    if (!ok) {
+      console.error("Invalid signature");
+      return res.sendStatus(401);
     }
+
+    // Only now parse JSON
+    const body = JSON.parse(bodyText);
+    const events = body.events || [];
+
+    // Handle events
+    await Promise.all(
+      events.map(async (event) => {
+        console.log("EVENT:", JSON.stringify(event));
+
+        if (event.type === "message" && event.message.type === "text") {
+          // simple echo
+          await client.replyMessage(event.replyToken, {
+            type: "text",
+            text: `你說了：${event.message.text}`
+          });
+        }
+      })
+    );
+
+    return res.sendStatus(200);
+  } catch (err) {
+    console.error("Webhook error:", err);
+    // Always return 200 so LINE doesn't keep retrying
+    return res.sendStatus(200);
   }
-  res.status(200).end();
 });
 
-// CRON
+// 3) JSON middleware for other routes (after webhook!)
+app.use(express.json());
+
+// 4) Optional: cron endpoint for push messages
 app.post("/cron", async (req, res) => {
-  const token = req.query.token;
-  if (!CRON_SECRET || token !== CRON_SECRET) return res.sendStatus(403);
-  if (!PUSH_USER_ID) return res.status(200).send("PUSH_USER_ID not set");
+  try {
+    const token = req.query.token;
+    if (!CRON_SECRET || token !== CRON_SECRET) return res.sendStatus(403);
+    if (!PUSH_USER_ID) return res.status(200).send("PUSH_USER_ID not set");
 
-  const messages = [
-    "おはよう！きょうもがんばろう！",
-    "すこしずつ、じぶんのペースで。",
-    "きょうはいいひですね。",
-    "やすむことも、たいせつです。"
-  ];
-  const msg = messages[Math.floor(Math.random() * messages.length)];
+    const messages = [
+      "おはよう！きょうもがんばろう！",
+      "すこしずつ、じぶんのペースで。",
+      "きょうはいいひですね。",
+      "やすむことも、たいせつです。"
+    ];
+    const msg = messages[Math.floor(Math.random() * messages.length)];
 
-  await client.pushMessage(PUSH_USER_ID, { type: "text", text: msg });
-  res.status(200).send("pushed");
+    await client.pushMessage(PUSH_USER_ID, { type: "text", text: msg });
+    return res.status(200).send("pushed");
+  } catch (e) {
+    console.error("Cron error:", e);
+    return res.sendStatus(200);
+  }
 });
 
-// ✅ 結尾一定要有這兩行
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Bot is running on port", PORT));
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log("Bot is running on port", port));
