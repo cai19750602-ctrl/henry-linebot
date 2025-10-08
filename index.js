@@ -16,33 +16,32 @@ const config = {
 const app = express();
 const client = new line.Client(config);
 
-// 1) Health check
+// 健康檢查
 app.get("/", (_req, res) => res.status(200).send("OK"));
 
-// 2) WEBHOOK — must be raw, and must come BEFORE any express.json()
+// Webhook 路由（一定要放在 JSON middleware 之前！）
 app.post("/webhook", express.raw({ type: "application/json" }), async (req, res) => {
   try {
     const signature = req.get("x-line-signature") || "";
-    const bodyText = req.body.toString("utf8"); // raw buffer -> string
+    const bodyText = req.body.toString("utf8");
 
-    // Validate signature first
+    // 驗證簽章
     const ok = line.validateSignature(bodyText, CHANNEL_SECRET, signature);
     if (!ok) {
       console.error("Invalid signature");
       return res.sendStatus(401);
     }
 
-    // Only now parse JSON
+    // 驗完後才 parse JSON
     const body = JSON.parse(bodyText);
     const events = body.events || [];
 
-    // Handle events
+    // 處理事件
     await Promise.all(
       events.map(async (event) => {
         console.log("EVENT:", JSON.stringify(event));
 
         if (event.type === "message" && event.message.type === "text") {
-          // simple echo
           await client.replyMessage(event.replyToken, {
             type: "text",
             text: `你說了：${event.message.text}`
@@ -54,15 +53,15 @@ app.post("/webhook", express.raw({ type: "application/json" }), async (req, res)
     return res.sendStatus(200);
   } catch (err) {
     console.error("Webhook error:", err);
-    // Always return 200 so LINE doesn't keep retrying
+    // 即使出錯，也要回 200，避免 LINE 重複重試
     return res.sendStatus(200);
   }
 });
 
-// 3) JSON middleware for other routes (after webhook!)
+// 這裡之後才啟用 JSON middleware
 app.use(express.json());
 
-// 4) Optional: cron endpoint for push messages
+// CRON 推播路由
 app.post("/cron", async (req, res) => {
   try {
     const token = req.query.token;
